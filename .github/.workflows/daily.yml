@@ -1,8 +1,11 @@
 name: Fight Calendar
 
 on:
+  push:
+    branches:
+      - main
+
   schedule:
-    # Tous les jours à 07:00 UTC
     - cron: "0 7 * * *"
 
   workflow_dispatch:
@@ -11,13 +14,10 @@ permissions:
   contents: write
 
 jobs:
-
   update:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -36,8 +36,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           DAYS_AHEAD: "30"
         run: |
-          cd src
-          python main.py
+          python src/main.py
 
       - name: Save database
         run: |
