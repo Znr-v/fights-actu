@@ -1,4 +1,5 @@
 import re
+import time
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone
@@ -13,21 +14,49 @@ HEADERS = {
     )
 }
 
+# Wikipedia exige un User-Agent identifiable (avec une URL de contact) et
+# bloque en 403 les clients qui enchaînent les requêtes sans pause.
+# Voir https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy
+WIKIPEDIA_HEADERS = {
+    "User-Agent": (
+        "fights-actu-bot/1.0 "
+        "(https://github.com/Znr-v/fights-actu; "
+        "GitHub Actions cron job for a Discord fight-calendar bot)"
+    )
+}
+
 TIMEOUT = 20
 
 
-def get_html(url):
-    try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=TIMEOUT
-        )
-        response.raise_for_status()
-        return response.text
-    except Exception as e:
-        print(f"[ERROR] {url}: {e}")
-        return None
+def get_html(url, headers=None, retries=2, backoff=3):
+    headers = headers or HEADERS
+
+    for attempt in range(retries + 1):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=TIMEOUT
+            )
+
+            if response.status_code == 403 and attempt < retries:
+                print(
+                    f"[WARN] {url}: 403, retry dans "
+                    f"{backoff}s ({attempt + 1}/{retries})"
+                )
+                time.sleep(backoff)
+                continue
+
+            response.raise_for_status()
+            return response.text
+
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(backoff)
+                continue
+
+            print(f"[ERROR] {url}: {e}")
+            return None
 
 
 def clean_text(text):
@@ -161,66 +190,107 @@ def scrape_ufc():
 # ============================================================
 # GLORY
 # ============================================================
+#
+# glorykickboxing.com/events renders its event list client-side with
+# JavaScript: a plain requests.get() only receives the page shell
+# (header/footer/newsletter form), never the actual events, so no amount
+# of CSS-selector tweaking on that URL can work. Instead we read GLORY's
+# own Wikipedia "<year> in Glory" pages, which are static HTML and
+# already contain a plain recap table near the top of the page:
+#   # | Event Title | Date | Arena | Location
+# kept up to date by editors as soon as an event is officially announced.
+
+def _find_table_with_headers(soup, required_keywords):
+    """Return the first <table> whose header row contains all the given
+    keywords (case-insensitive substring match)."""
+
+    for table in soup.find_all("table"):
+        header_row = table.find("tr")
+
+        if not header_row:
+            continue
+
+        headers = [
+            clean_text(c.get_text(" ", strip=True)).lower()
+            for c in header_row.find_all(["th", "td"])
+        ]
+
+        if all(
+            any(keyword in h for h in headers)
+            for keyword in required_keywords
+        ):
+            return table, headers
+
+    return None, None
+
 
 def scrape_glory():
-    url = "https://glorykickboxing.com/events"
-    html = get_html(url)
-
-    if not html:
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
     events = []
+    now = datetime.now(timezone.utc)
 
-    for link in soup.find_all("a", href=True):
+    # Check the current year's page and next year's, in case upcoming
+    # events already have their own page near a year boundary.
+    for year in sorted({now.year, now.year + 1}):
 
-        href = link.get("href", "")
+        url = f"https://en.wikipedia.org/wiki/{year}_in_Glory"
+        html = get_html(url, headers=WIKIPEDIA_HEADERS)
 
-        if "/events/" not in href:
+        if not html:
             continue
 
-        if not href.startswith("http"):
-            href = "https://glorykickboxing.com" + href
+        soup = BeautifulSoup(html, "html.parser")
 
-        text = clean_text(link.get_text(" ", strip=True))
-
-        if not text:
-            continue
-
-        # Récupère le bloc parent pour obtenir date/localisation
-        parent = link
-
-        for _ in range(4):
-            if parent.parent:
-                parent = parent.parent
-
-        parent_text = clean_text(
-            parent.get_text(" ", strip=True)
+        table, headers = _find_table_with_headers(
+            soup, ["event", "date"]
         )
 
-        date_match = re.search(
-            r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-            r"\s+\d{1,2}",
-            parent_text,
-            re.I
-        )
-
-        if not date_match:
+        if table is None:
             continue
 
-        date = parse_date(date_match.group(0))
+        def col(keyword, default):
+            for i, h in enumerate(headers):
+                if keyword in h:
+                    return i
+            return default
 
-        if not date:
-            continue
+        idx_name = col("event", 1)
+        idx_date = col("date", 2)
+        idx_venue = col("arena", 3)
+        idx_location = col("location", 4)
 
-        events.append(
-            make_event(
-                organization="GLORY",
-                name=text,
-                date=date,
-                url=href
+        for row in table.select("tr")[1:]:
+
+            cells = row.find_all(["td", "th"])
+
+            if len(cells) <= max(idx_name, idx_date, idx_venue, idx_location):
+                continue
+
+            name = clean_text(cells[idx_name].get_text(" ", strip=True))
+            date_text = clean_text(cells[idx_date].get_text(" ", strip=True))
+            venue = clean_text(cells[idx_venue].get_text(" ", strip=True))
+            location = clean_text(
+                cells[idx_location].get_text(" ", strip=True)
             )
-        )
+
+            if not name or not date_text:
+                continue
+
+            date = parse_date(date_text)
+
+            if not date:
+                continue
+
+            events.append(
+                make_event(
+                    organization="GLORY",
+                    name=name,
+                    date=date,
+                    url=url,
+                    location=location or venue
+                )
+            )
+
+        time.sleep(1)
 
     return deduplicate_events(events)
 
@@ -228,10 +298,17 @@ def scrape_glory():
 # ============================================================
 # ONE CHAMPIONSHIP
 # ============================================================
+#
+# Just like GLORY, onefc.com/events/ is a JavaScript-rendered page with
+# no event data in the static HTML. ONE Championship's Wikipedia page
+# "List of ONE Championship events" is a plain, regularly-updated
+# wikitable with columns # | Event | Date | Venue | Location | ... and
+# already includes officially confirmed future events, so we read that
+# instead.
 
 def scrape_one():
-    url = "https://www.onefc.com/events/"
-    html = get_html(url)
+    url = "https://en.wikipedia.org/wiki/List_of_ONE_Championship_events"
+    html = get_html(url, headers=WIKIPEDIA_HEADERS)
 
     if not html:
         return []
@@ -239,58 +316,61 @@ def scrape_one():
     soup = BeautifulSoup(html, "html.parser")
     events = []
 
-    for link in soup.find_all("a", href=True):
+    table = soup.select_one("table.wikitable")
 
-        href = link.get("href", "")
+    if not table:
+        return []
 
-        if "/events/" not in href:
+    header_cells = [
+        clean_text(th.get_text(" ", strip=True)).lower()
+        for th in table.select_one("tr").find_all(["th", "td"])
+    ]
+
+    def col(label, default):
+        return header_cells.index(label) if label in header_cells else default
+
+    idx_event = col("event", 1)
+    idx_date = col("date", 2)
+    idx_venue = col("venue", 3)
+    idx_location = col("location", 4)
+
+    rows = table.select("tr")[1:]
+
+    for row in rows:
+
+        cells = row.find_all(["td", "th"])
+
+        if len(cells) <= max(idx_event, idx_date, idx_venue, idx_location):
             continue
 
-        if not href.startswith("http"):
-            href = "https://www.onefc.com" + href
+        name = clean_text(cells[idx_event].get_text(" ", strip=True))
+        date_text = clean_text(cells[idx_date].get_text(" ", strip=True))
+        venue = clean_text(cells[idx_venue].get_text(" ", strip=True))
+        location = clean_text(cells[idx_location].get_text(" ", strip=True))
 
-        parent = link
-
-        for _ in range(5):
-            if parent.parent:
-                parent = parent.parent
-
-        text = clean_text(
-            parent.get_text(" ", strip=True)
-        )
-
-        if len(text) < 5:
+        if not name or not date_text or date_text.upper() in ("TBD", "TBA"):
             continue
 
-        # Recherche une date complète
-        date_match = re.search(
-            r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-            r"\s+\d{1,2}(?:,\s*|\s+)\d{4}",
-            text,
-            re.I
-        )
-
-        if not date_match:
-            continue
-
-        date = parse_date(date_match.group(0))
+        date = parse_date(date_text)
 
         if not date:
             continue
 
-        title = clean_text(
-            link.get_text(" ", strip=True)
-        )
+        link = cells[idx_event].find("a", href=True)
 
-        if not title:
-            title = text[:150]
+        event_url = (
+            "https://en.wikipedia.org" + link["href"]
+            if link and link["href"].startswith("/wiki/")
+            else url
+        )
 
         events.append(
             make_event(
                 organization="ONE",
-                name=title,
+                name=name,
                 date=date,
-                url=href
+                url=event_url,
+                location=location or venue
             )
         )
 
@@ -413,6 +493,7 @@ def get_all_events():
         print(f"[INFO] Scraping {name}...")
 
         try:
+            time.sleep(1)  # évite d'enchaîner les requêtes trop vite
             events = scraper()
 
             print(
