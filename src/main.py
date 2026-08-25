@@ -8,48 +8,31 @@ import requests
 from scrapers import get_all_events
 
 
-DISCORD_WEBHOOK = os.environ.get(
-    "DISCORD_WEBHOOK"
-)
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
+DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "30"))
 
 DATA_FILE = Path("data/sent.json")
 
-DAYS_AHEAD = int(
-    os.environ.get("DAYS_AHEAD", "30")
-)
 
+# ============================================================
+# DATABASE
+# ============================================================
 
 def load_sent():
     if not DATA_FILE.exists():
-        return {
-            "events": []
-        }
+        return {"events": []}
 
     try:
-        with open(
-            DATA_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-
     except Exception:
-        return {
-            "events": []
-        }
+        return {"events": []}
 
 
 def save_sent(data):
-    DATA_FILE.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(
-        DATA_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(
             data,
             f,
@@ -66,37 +49,51 @@ def event_id(event):
     ])
 
 
+# ============================================================
+# FORMAT
+# ============================================================
+
+ORG_EMOJI = {
+    "UFC": "🥊",
+    "PFL": "🥋",
+    "GLORY": "🥊",
+    "ONE": "🔥",
+}
+
+
 def format_date(date_string):
-    dt = datetime.fromisoformat(
-        date_string
-    )
-
-    # UTC -> heure française approximative.
-    # Pour les dates sans heure précise, cela ne change pas le jour.
-    dt = dt.astimezone()
-
-    return dt.strftime("%d/%m/%Y")
+    try:
+        dt = datetime.fromisoformat(date_string)
+        return dt.strftime("%A %d %B %Y").capitalize()
+    except Exception:
+        return date_string
 
 
-def emoji(org):
-    return {
-        "UFC": "🥊",
-        "PFL": "🥋",
-        "GLORY": "🥊",
-        "ONE": "🔥"
-    }.get(org, "🥊")
+def fight_line(fight):
+    fighter1 = fight.get("fighter1", "").strip()
+    fighter2 = fight.get("fighter2", "").strip()
 
+    if not fighter1 or not fighter2:
+        return None
+
+    label = fight.get("label", "")
+
+    if label:
+        return f"• **{label}** — {fighter1} 🆚 {fighter2}"
+
+    return f"• {fighter1} 🆚 {fighter2}"
+
+
+# ============================================================
+# DISCORD MESSAGE
+# ============================================================
 
 def build_message(events):
+
     lines = []
 
-    lines.append(
-        "🔥 **PROCHAINS COMBATS — MMA & KICKBOXING**"
-    )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━━━"
-    )
+    lines.append("🔥 **PROCHAINS COMBATS — MMA & KICKBOXING**")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     grouped = {}
 
@@ -122,30 +119,65 @@ def build_message(events):
 
         lines.append("")
         lines.append(
-            f"{emoji(org)} **{org}**"
+            f"{ORG_EMOJI.get(org, '🥊')} **{org}**"
         )
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
 
-        sorted_events = sorted(
+        events_for_org = sorted(
             grouped[org],
-            key=lambda x: x["date"] or ""
+            key=lambda x: x.get("date") or ""
         )
 
-        for event in sorted_events:
+        for event in events_for_org:
 
-            date = format_date(
-                event["date"]
+            date = format_date(event["date"])
+
+            lines.append("")
+            lines.append(
+                f"📅 **{date}**"
             )
-
-            name = event["name"]
 
             lines.append(
-                f"📅 **{date}** — {name}"
+                f"🏟️ **{event['name']}**"
             )
 
-            if event.get("location"):
-                lines.append(
-                    f"📍 {event['location']}"
-                )
+            fights = event.get("fights", [])
+
+            if fights:
+
+                main_event = None
+                other_fights = []
+
+                for fight in fights:
+                    if fight.get("main_event"):
+                        main_event = fight
+                    else:
+                        other_fights.append(fight)
+
+                if main_event:
+                    line = fight_line(main_event)
+
+                    if line:
+                        lines.append("")
+                        lines.append("🔥 **MAIN EVENT**")
+                        lines.append(line)
+
+                if other_fights:
+
+                    lines.append("")
+                    lines.append("⚔️ **CARTE**")
+
+                    for fight in other_fights[:12]:
+
+                        line = fight_line(fight)
+
+                        if line:
+                            lines.append(line)
+
+                if len(fights) > 13:
+                    lines.append(
+                        f"… + {len(fights) - 13} autres combats"
+                    )
 
             if event.get("url"):
                 lines.append(
@@ -153,28 +185,28 @@ def build_message(events):
                 )
 
     lines.append("")
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        "🤖 Calendrier automatique"
-    )
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🤖 Calendrier automatique")
 
     return "\n".join(lines)
 
 
+# ============================================================
+# DISCORD
+# ============================================================
+
 def send_discord(message):
+
     if not DISCORD_WEBHOOK:
         raise RuntimeError(
             "DISCORD_WEBHOOK n'est pas configuré."
         )
 
     payload = {
-        "content": message,
-        "username": "Fight Calendar Bot",
+        "content": "@everyone\n" + message,
+        "username": "Fight Calendar",
         "allowed_mentions": {
-            "parse": []
+            "parse": ["everyone"]
         }
     }
 
@@ -184,37 +216,34 @@ def send_discord(message):
         timeout=20
     )
 
-    if response.status_code not in (
-        200,
-        204
-    ):
+    if response.status_code not in (200, 204):
         raise RuntimeError(
-            f"Discord error "
-            f"{response.status_code}: "
+            f"Discord error {response.status_code}: "
             f"{response.text}"
         )
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
 
     print("================================")
-    print("FIGHT CALENDAR BOT")
+    print("FIGHT CALENDAR V2")
     print("================================")
 
-    now = datetime.now(
-        timezone.utc
-    )
+    now = datetime.now(timezone.utc)
 
     limit = now + timedelta(
         days=DAYS_AHEAD
     )
 
-    print(
-        f"[INFO] Recherche jusqu'au "
-        f"{limit.date()}"
-    )
-
     events = get_all_events()
+
+    print(
+        f"[INFO] {len(events)} événements récupérés."
+    )
 
     upcoming = []
 
@@ -244,20 +273,17 @@ def main():
     )
 
     print(
-        f"[INFO] {len(upcoming)} événements "
-        f"à venir."
+        f"[INFO] {len(upcoming)} événements à venir."
     )
 
     if not upcoming:
-        print(
-            "[INFO] Aucun événement trouvé."
-        )
+        print("[INFO] Aucun événement.")
         return
 
-    data = load_sent()
+    database = load_sent()
 
-    sent_ids = set(
-        data.get("events", [])
+    sent = set(
+        database.get("events", [])
     )
 
     new_events = []
@@ -266,48 +292,38 @@ def main():
 
         eid = event_id(event)
 
-        if eid not in sent_ids:
+        if eid not in sent:
             new_events.append(event)
 
     print(
-        f"[INFO] {len(new_events)} nouveaux "
-        f"événements."
+        f"[INFO] {len(new_events)} nouveaux événements."
     )
 
-    # IMPORTANT :
-    # Pour la première exécution, on envoie tout.
-    if new_events:
-
-        message = build_message(
-            new_events
-        )
-
-        print(message)
-
-        send_discord(message)
-
-        for event in new_events:
-            sent_ids.add(
-                event_id(event)
-            )
-
-        # On garde seulement les 500 derniers
-        data["events"] = list(
-            sent_ids
-        )[-500:]
-
-        save_sent(data)
-
-        print(
-            "[OK] Message envoyé sur Discord."
-        )
-
-    else:
-
+    if not new_events:
         print(
             "[INFO] Rien de nouveau. "
-            "Aucun message envoyé."
+            "Aucun ping."
         )
+        return
+
+    message = build_message(
+        new_events
+    )
+
+    print(message)
+
+    send_discord(message)
+
+    for event in new_events:
+        sent.add(
+            event_id(event)
+        )
+
+    database["events"] = list(sent)[-500:]
+
+    save_sent(database)
+
+    print("[OK] Discord envoyé avec @everyone.")
 
 
 if __name__ == "__main__":
