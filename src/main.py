@@ -6,6 +6,7 @@ from pathlib import Path
 import requests
 
 from scrapers import get_all_events
+import telegram_notify
 
 
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
@@ -207,7 +208,8 @@ def send_discord(content=None, embeds=None, mention_everyone=True):
 def send_event_batch(content, events, mention_everyone=True):
     """Envoie une liste d'événements sous forme d'embeds, en respectant
     la limite Discord de 10 embeds par message (un seul message si
-    <= 10 événements, sinon plusieurs messages à la suite)."""
+    <= 10 événements, sinon plusieurs messages à la suite). Envoie
+    aussi les mêmes événements sur Telegram si configuré."""
 
     embed_batches = list(
         chunk([build_event_embed(e) for e in events], 10)
@@ -219,6 +221,13 @@ def send_event_batch(content, events, mention_everyone=True):
             embeds=batch,
             mention_everyone=mention_everyone if i == 0 else False
         )
+
+    try:
+        telegram_notify.send_event_batch(content, events, event_date)
+    except Exception as e:
+        # Telegram est un bonus : une erreur ici ne doit jamais faire
+        # planter le script (Discord a déjà été envoyé au-dessus).
+        print(f"[WARN] Envoi Telegram échoué: {e}")
 
 
 # ============================================================
