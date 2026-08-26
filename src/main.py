@@ -20,13 +20,16 @@ DATA_FILE = Path("data/sent.json")
 
 def load_sent():
     if not DATA_FILE.exists():
-        return {"events": []}
+        return {"events": [], "reminded": []}
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            data.setdefault("events", [])
+            data.setdefault("reminded", [])
+            return data
     except Exception:
-        return {"events": []}
+        return {"events": [], "reminded": []}
 
 
 def save_sent(data):
@@ -47,6 +50,23 @@ def event_id(event):
         event.get("name", ""),
         event.get("date", "")
     ])
+
+
+def event_date(event):
+    try:
+        dt = datetime.fromisoformat(event["date"])
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt
+    except Exception:
+        return None
+
+
+def is_today(event, now):
+    dt = event_date(event)
+    return dt is not None and dt.date() == now.date()
 
 
 # ============================================================
@@ -95,98 +115,104 @@ def build_message(events):
     lines.append("🔥 **PROCHAINS COMBATS — MMA & KICKBOXING**")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
 
-    grouped = {}
+    events_sorted = sorted(
+        events,
+        key=lambda x: x.get("date") or ""
+    )
 
-    for event in events:
+    for event in events_sorted:
+
         org = event["organization"]
-
-        if org not in grouped:
-            grouped[org] = []
-
-        grouped[org].append(event)
-
-    order = [
-        "UFC",
-        "PFL",
-        "ONE",
-        "GLORY"
-    ]
-
-    for org in order:
-
-        if org not in grouped:
-            continue
+        date = format_date(event["date"])
 
         lines.append("")
+        lines.append(f"📅 **{date}**")
         lines.append(
-            f"{ORG_EMOJI.get(org, '🥊')} **{org}**"
-        )
-        lines.append("━━━━━━━━━━━━━━━━━━━━")
-
-        events_for_org = sorted(
-            grouped[org],
-            key=lambda x: x.get("date") or ""
+            f"{ORG_EMOJI.get(org, '🥊')} **{org} — {event['name']}**"
         )
 
-        for event in events_for_org:
+        fights = event.get("fights", [])
 
-            date = format_date(event["date"])
+        if fights:
 
-            lines.append("")
-            lines.append(
-                f"📅 **{date}**"
-            )
+            main_event = None
+            other_fights = []
 
-            lines.append(
-                f"🏟️ **{event['name']}**"
-            )
+            for fight in fights:
+                if fight.get("main_event"):
+                    main_event = fight
+                else:
+                    other_fights.append(fight)
 
-            fights = event.get("fights", [])
+            if main_event:
+                line = fight_line(main_event)
 
-            if fights:
+                if line:
+                    lines.append("🔥 " + line.lstrip("• "))
 
-                main_event = None
-                other_fights = []
+            for fight in other_fights[:12]:
 
-                for fight in fights:
-                    if fight.get("main_event"):
-                        main_event = fight
-                    else:
-                        other_fights.append(fight)
+                line = fight_line(fight)
 
-                if main_event:
-                    line = fight_line(main_event)
+                if line:
+                    lines.append(line)
 
-                    if line:
-                        lines.append("")
-                        lines.append("🔥 **MAIN EVENT**")
-                        lines.append(line)
-
-                if other_fights:
-
-                    lines.append("")
-                    lines.append("⚔️ **CARTE**")
-
-                    for fight in other_fights[:12]:
-
-                        line = fight_line(fight)
-
-                        if line:
-                            lines.append(line)
-
-                if len(fights) > 13:
-                    lines.append(
-                        f"… + {len(fights) - 13} autres combats"
-                    )
-
-            if event.get("url"):
+            if len(fights) > 13:
                 lines.append(
-                    f"🔗 {event['url']}"
+                    f"… + {len(fights) - 13} autres combats"
                 )
+
+        if event.get("url"):
+            lines.append(f"🔗 {event['url']}")
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("🤖 Calendrier automatique")
+
+    return "\n".join(lines)
+
+
+def build_reminder_message(events):
+
+    lines = []
+
+    lines.append("⏰ **ÇA SE PASSE AUJOURD'HUI !**")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
+    events_sorted = sorted(
+        events,
+        key=lambda x: x.get("date") or ""
+    )
+
+    for event in events_sorted:
+
+        org = event["organization"]
+
+        lines.append("")
+        lines.append(
+            f"{ORG_EMOJI.get(org, '🥊')} **{org} — {event['name']}**"
+        )
+
+        main_event = next(
+            (f for f in event.get("fights", []) if f.get("main_event")),
+            None
+        )
+
+        if main_event:
+            line = fight_line(main_event)
+
+            if line:
+                lines.append(line)
+
+        if event.get("location"):
+            lines.append(f"📍 {event['location']}")
+
+        if event.get("url"):
+            lines.append(f"🔗 {event['url']}")
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("🤖 Rappel automatique")
 
     return "\n".join(lines)
 
@@ -249,20 +275,9 @@ def main():
 
     for event in events:
 
-        if not event.get("date"):
-            continue
+        dt = event_date(event)
 
-        try:
-            dt = datetime.fromisoformat(
-                event["date"]
-            )
-
-            if dt.tzinfo is None:
-                dt = dt.replace(
-                    tzinfo=timezone.utc
-                )
-
-        except Exception:
+        if dt is None:
             continue
 
         if now <= dt <= limit:
@@ -282,44 +297,47 @@ def main():
 
     database = load_sent()
 
-    sent = set(
-        database.get("events", [])
-    )
+    sent = set(database.get("events", []))
+    reminded = set(database.get("reminded", []))
 
-    new_events = []
+    # 1) Annonce des nouveaux événements découverts
+    new_events = [
+        event for event in upcoming
+        if event_id(event) not in sent
+    ]
 
-    for event in upcoming:
+    print(f"[INFO] {len(new_events)} nouveaux événements.")
 
-        eid = event_id(event)
+    if new_events:
+        message = build_message(new_events)
+        print(message)
+        send_discord(message)
 
-        if eid not in sent:
-            new_events.append(event)
+        for event in new_events:
+            sent.add(event_id(event))
 
-    print(
-        f"[INFO] {len(new_events)} nouveaux événements."
-    )
+    # 2) Rappel "c'est aujourd'hui" pour les événements du jour
+    today_events = [
+        event for event in upcoming
+        if is_today(event, now) and event_id(event) not in reminded
+    ]
 
-    if not new_events:
-        print(
-            "[INFO] Rien de nouveau. "
-            "Aucun ping."
-        )
+    print(f"[INFO] {len(today_events)} événement(s) aujourd'hui à rappeler.")
+
+    if today_events:
+        reminder = build_reminder_message(today_events)
+        print(reminder)
+        send_discord(reminder)
+
+        for event in today_events:
+            reminded.add(event_id(event))
+
+    if not new_events and not today_events:
+        print("[INFO] Rien de nouveau et rien aujourd'hui. Aucun ping.")
         return
 
-    message = build_message(
-        new_events
-    )
-
-    print(message)
-
-    send_discord(message)
-
-    for event in new_events:
-        sent.add(
-            event_id(event)
-        )
-
     database["events"] = list(sent)[-500:]
+    database["reminded"] = list(reminded)[-500:]
 
     save_sent(database)
 
