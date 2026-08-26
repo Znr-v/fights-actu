@@ -19,17 +19,21 @@ DATA_FILE = Path("data/sent.json")
 # ============================================================
 
 def load_sent():
+    default = {"events": [], "reminded": [], "last_daily_reminder": None}
+
     if not DATA_FILE.exists():
-        return {"events": [], "reminded": []}
+        return default
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            data.setdefault("events", [])
-            data.setdefault("reminded", [])
-            return data
+
+        for key, value in default.items():
+            data.setdefault(key, value)
+
+        return data
     except Exception:
-        return {"events": [], "reminded": []}
+        return default
 
 
 def save_sent(data):
@@ -70,171 +74,122 @@ def is_today(event, now):
 
 
 # ============================================================
-# FORMAT
+# FORMAT / EMBEDS
 # ============================================================
 
 ORG_EMOJI = {
     "UFC": "🥊",
     "PFL": "🥋",
-    "GLORY": "🥊",
+    "GLORY": "🥇",
     "ONE": "🔥",
 }
 
+# Couleurs proches de l'identité visuelle de chaque organisation
+ORG_COLOR = {
+    "UFC": 0xD20A0A,
+    "PFL": 0x1479CE,
+    "GLORY": 0xF5C518,
+    "ONE": 0xFF4500,
+}
 
-def format_date(date_string):
-    try:
-        dt = datetime.fromisoformat(date_string)
-        return dt.strftime("%A %d %B %Y").capitalize()
-    except Exception:
-        return date_string
-
-
-def fight_line(fight):
-    fighter1 = fight.get("fighter1", "").strip()
-    fighter2 = fight.get("fighter2", "").strip()
-
-    if not fighter1 or not fighter2:
-        return None
-
-    label = fight.get("label", "")
-
-    if label:
-        return f"• **{label}** — {fighter1} 🆚 {fighter2}"
-
-    return f"• {fighter1} 🆚 {fighter2}"
+DEFAULT_COLOR = 0x2F3136
 
 
-# ============================================================
-# DISCORD MESSAGE
-# ============================================================
+def discord_ts(dt, style="D"):
+    """Timestamp dynamique Discord (s'affiche selon la langue/fuseau de
+    chaque utilisateur). style: D = date longue, R = relatif ("dans 3
+    jours")."""
 
-def build_message(events):
+    if not dt:
+        return ""
 
-    lines = []
+    return f"<t:{int(dt.timestamp())}:{style}>"
 
-    lines.append("🔥 **PROCHAINS COMBATS — MMA & KICKBOXING**")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
 
-    events_sorted = sorted(
-        events,
-        key=lambda x: x.get("date") or ""
+def build_event_embed(event):
+
+    org = event.get("organization", "")
+    emoji = ORG_EMOJI.get(org, "🥊")
+    color = ORG_COLOR.get(org, DEFAULT_COLOR)
+    dt = event_date(event)
+
+    main_event = next(
+        (f for f in event.get("fights", []) if f.get("main_event")),
+        None
     )
 
-    for event in events_sorted:
+    description = None
 
-        org = event["organization"]
-        date = format_date(event["date"])
+    if main_event:
+        f1 = main_event.get("fighter1", "").strip()
+        f2 = main_event.get("fighter2", "").strip()
 
-        lines.append("")
-        lines.append(f"📅 **{date}**")
-        lines.append(
-            f"{ORG_EMOJI.get(org, '🥊')} **{org} — {event['name']}**"
-        )
+        if f1 and f2:
+            description = f"🥊 **{f1}**  🆚  **{f2}**"
 
-        fights = event.get("fights", [])
+    fields = []
 
-        if fights:
+    if dt:
+        fields.append({
+            "name": "📅 Date",
+            "value": f"{discord_ts(dt, 'D')}\n{discord_ts(dt, 'R')}",
+            "inline": True
+        })
 
-            main_event = None
-            other_fights = []
+    if event.get("location"):
+        fields.append({
+            "name": "📍 Lieu",
+            "value": event["location"],
+            "inline": True
+        })
 
-            for fight in fights:
-                if fight.get("main_event"):
-                    main_event = fight
-                else:
-                    other_fights.append(fight)
+    embed = {
+        "author": {"name": f"{emoji}  {org}"},
+        "title": event.get("name", "Événement"),
+        "url": event.get("url") or None,
+        "description": description,
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "Fight Calendar"}
+    }
 
-            if main_event:
-                line = fight_line(main_event)
-
-                if line:
-                    lines.append("🔥 " + line.lstrip("• "))
-
-            for fight in other_fights[:12]:
-
-                line = fight_line(fight)
-
-                if line:
-                    lines.append(line)
-
-            if len(fights) > 13:
-                lines.append(
-                    f"… + {len(fights) - 13} autres combats"
-                )
-
-        if event.get("url"):
-            lines.append(f"🔗 {event['url']}")
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🤖 Calendrier automatique")
-
-    return "\n".join(lines)
+    return {k: v for k, v in embed.items() if v not in (None, [], "")}
 
 
-def build_reminder_message(events):
-
-    lines = []
-
-    lines.append("⏰ **ÇA SE PASSE AUJOURD'HUI !**")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-
-    events_sorted = sorted(
-        events,
-        key=lambda x: x.get("date") or ""
-    )
-
-    for event in events_sorted:
-
-        org = event["organization"]
-
-        lines.append("")
-        lines.append(
-            f"{ORG_EMOJI.get(org, '🥊')} **{org} — {event['name']}**"
-        )
-
-        main_event = next(
-            (f for f in event.get("fights", []) if f.get("main_event")),
-            None
-        )
-
-        if main_event:
-            line = fight_line(main_event)
-
-            if line:
-                lines.append(line)
-
-        if event.get("location"):
-            lines.append(f"📍 {event['location']}")
-
-        if event.get("url"):
-            lines.append(f"🔗 {event['url']}")
-
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append("🤖 Rappel automatique")
-
-    return "\n".join(lines)
+def chunk(items, size):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 # ============================================================
 # DISCORD
 # ============================================================
 
-def send_discord(message):
+def send_discord(content=None, embeds=None, mention_everyone=True):
 
     if not DISCORD_WEBHOOK:
         raise RuntimeError(
             "DISCORD_WEBHOOK n'est pas configuré."
         )
 
+    text = content or ""
+
+    if mention_everyone:
+        text = "@everyone" + (f"\n{text}" if text else "")
+        allowed_mentions = {"parse": ["everyone"]}
+    else:
+        allowed_mentions = {"parse": []}
+
     payload = {
-        "content": "@everyone\n" + message,
         "username": "Fight Calendar",
-        "allowed_mentions": {
-            "parse": ["everyone"]
-        }
+        "allowed_mentions": allowed_mentions
     }
+
+    if text:
+        payload["content"] = text
+
+    if embeds:
+        payload["embeds"] = embeds[:10]
 
     response = requests.post(
         DISCORD_WEBHOOK,
@@ -249,6 +204,23 @@ def send_discord(message):
         )
 
 
+def send_event_batch(content, events, mention_everyone=True):
+    """Envoie une liste d'événements sous forme d'embeds, en respectant
+    la limite Discord de 10 embeds par message (un seul message si
+    <= 10 événements, sinon plusieurs messages à la suite)."""
+
+    embed_batches = list(
+        chunk([build_event_embed(e) for e in events], 10)
+    )
+
+    for i, batch in enumerate(embed_batches):
+        send_discord(
+            content=content if i == 0 else None,
+            embeds=batch,
+            mention_everyone=mention_everyone if i == 0 else False
+        )
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -260,16 +232,13 @@ def main():
     print("================================")
 
     now = datetime.now(timezone.utc)
+    today_str = now.date().isoformat()
 
-    limit = now + timedelta(
-        days=DAYS_AHEAD
-    )
+    limit = now + timedelta(days=DAYS_AHEAD)
 
     events = get_all_events()
 
-    print(
-        f"[INFO] {len(events)} événements récupérés."
-    )
+    print(f"[INFO] {len(events)} événements récupérés.")
 
     upcoming = []
 
@@ -283,13 +252,9 @@ def main():
         if now <= dt <= limit:
             upcoming.append(event)
 
-    upcoming.sort(
-        key=lambda x: x["date"]
-    )
+    upcoming.sort(key=lambda x: x["date"])
 
-    print(
-        f"[INFO] {len(upcoming)} événements à venir."
-    )
+    print(f"[INFO] {len(upcoming)} événements à venir.")
 
     if not upcoming:
         print("[INFO] Aucun événement.")
@@ -299,6 +264,9 @@ def main():
 
     sent = set(database.get("events", []))
     reminded = set(database.get("reminded", []))
+    last_daily_reminder = database.get("last_daily_reminder")
+
+    did_something = False
 
     # 1) Annonce des nouveaux événements découverts
     new_events = [
@@ -309,14 +277,40 @@ def main():
     print(f"[INFO] {len(new_events)} nouveaux événements.")
 
     if new_events:
-        message = build_message(new_events)
-        print(message)
-        send_discord(message)
+        n = len(new_events)
+        label = "événement" if n == 1 else "événements"
+
+        send_event_batch(
+            content=f"🆕 **{n} nouveau{'x' if n > 1 else ''} {label} annoncé{'s' if n > 1 else ''} !**",
+            events=new_events,
+            mention_everyone=True
+        )
 
         for event in new_events:
             sent.add(event_id(event))
 
-    # 2) Rappel "c'est aujourd'hui" pour les événements du jour
+        did_something = True
+
+    # 2) Rappel quotidien : le combat le plus proche (une fois par jour)
+    nearest = upcoming[0]
+    nearest_already_announced = event_id(nearest) in {
+        event_id(e) for e in new_events
+    }
+
+    if last_daily_reminder != today_str and not nearest_already_announced:
+
+        send_event_batch(
+            content="📌 **Prochain combat à venir**",
+            events=[nearest],
+            mention_everyone=True
+        )
+
+        did_something = True
+
+    if last_daily_reminder != today_str:
+        last_daily_reminder = today_str
+
+    # 3) Rappel "c'est aujourd'hui" pour les événements du jour
     today_events = [
         event for event in upcoming
         if is_today(event, now) and event_id(event) not in reminded
@@ -325,23 +319,29 @@ def main():
     print(f"[INFO] {len(today_events)} événement(s) aujourd'hui à rappeler.")
 
     if today_events:
-        reminder = build_reminder_message(today_events)
-        print(reminder)
-        send_discord(reminder)
+
+        send_event_batch(
+            content="⏰ **Ça se passe aujourd'hui !**",
+            events=today_events,
+            mention_everyone=True
+        )
 
         for event in today_events:
             reminded.add(event_id(event))
 
-    if not new_events and not today_events:
-        print("[INFO] Rien de nouveau et rien aujourd'hui. Aucun ping.")
+        did_something = True
+
+    if not did_something:
+        print("[INFO] Rien de nouveau, rien à rappeler aujourd'hui.")
         return
 
     database["events"] = list(sent)[-500:]
     database["reminded"] = list(reminded)[-500:]
+    database["last_daily_reminder"] = last_daily_reminder
 
     save_sent(database)
 
-    print("[OK] Discord envoyé avec @everyone.")
+    print("[OK] Discord envoyé.")
 
 
 if __name__ == "__main__":
