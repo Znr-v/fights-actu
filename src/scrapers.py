@@ -224,6 +224,73 @@ def _find_table_with_headers(soup, required_keywords):
     return None, None
 
 
+def _extract_glory_main_event(soup, event_name):
+    """On a GLORY year page, each event has its own '<h2>/<h3>' heading
+    (e.g. "Glory 105") followed further down by a "Fight card" table
+    (columns: Weight Class | Fighter1 | vs./def. | Fighter2 | Method | ...).
+    The first row of that table is the headliner. Returns
+    (fighter1, fighter2) or None.
+    """
+
+    heading = None
+
+    for h in soup.find_all(["h2", "h3"]):
+        if clean_text(h.get_text(" ", strip=True)) == event_name:
+            heading = h
+            break
+
+    if heading is None:
+        return None
+
+    node = heading
+
+    for _ in range(60):
+        node = node.find_next(["h2", "h3", "table"])
+
+        if node is None:
+            return None
+
+        if node.name in ("h2", "h3"):
+            # Reached the next event's heading without finding a card.
+            return None
+
+        header_row = node.find("tr")
+
+        if not header_row:
+            continue
+
+        headers = [
+            clean_text(c.get_text(" ", strip=True)).lower()
+            for c in header_row.find_all(["th", "td"])
+        ]
+
+        if not any("method" in h for h in headers):
+            continue
+
+        data_rows = node.select("tr")[1:]
+
+        if not data_rows:
+            return None
+
+        cells = data_rows[0].find_all(["td", "th"])
+        texts = [
+            clean_text(c.get_text(" ", strip=True))
+            for c in cells
+        ]
+
+        fighters = [
+            t for t in texts[1:4]
+            if t and t.lower() not in ("vs.", "vs", "def.", "def")
+        ]
+
+        if len(fighters) >= 2:
+            return fighters[0], fighters[1]
+
+        return None
+
+    return None
+
+
 def scrape_glory():
     events = []
     now = datetime.now(timezone.utc)
@@ -280,13 +347,25 @@ def scrape_glory():
             if not date:
                 continue
 
+            fights = []
+            main_event = _extract_glory_main_event(soup, name)
+
+            if main_event:
+                fights = [{
+                    "fighter1": main_event[0],
+                    "fighter2": main_event[1],
+                    "label": "Main Event",
+                    "main_event": True
+                }]
+
             events.append(
                 make_event(
                     organization="GLORY",
                     name=name,
                     date=date,
                     url=url,
-                    location=location or venue
+                    location=location or venue,
+                    fights=fights
                 )
             )
 
@@ -305,6 +384,43 @@ def scrape_glory():
 # wikitable with columns # | Event | Date | Venue | Location | ... and
 # already includes officially confirmed future events, so we read that
 # instead.
+#
+# That list table has no fighter names though, so for events happening
+# soon we make one extra, targeted request to the event's own Wikipedia
+# article and pull the main event from its "Background" prose (pattern:
+# "... bout between X and Y headlined the event."). We only do this for
+# near-term events (not all ~60 events/year) to stay well within
+# Wikipedia's rate limits.
+
+ONE_MAIN_EVENT_RE = re.compile(
+    r"\bbetween\s+([A-Z][\w.\-' ]+?)\s+and\s+([A-Z][\w.\-' ]+?)\s+"
+    r"(?:headlined|served as the main event|"
+    r"was (?:scheduled|booked) as the main event)",
+    re.I
+)
+
+# How many days ahead we bother fetching individual ONE event pages for.
+# Should be >= DAYS_AHEAD in main.py so every announced event gets a
+# fighter card; kept modest to limit extra Wikipedia requests.
+ONE_FETCH_FIGHTERS_WITHIN_DAYS = 35
+
+
+def _fetch_one_main_event(event_url):
+    html = get_html(event_url, headers=WIKIPEDIA_HEADERS)
+
+    if not html:
+        return None
+
+    soup = BeautifulSoup(html, "html.parser")
+    text = clean_text(soup.get_text(" ", strip=True))
+
+    match = ONE_MAIN_EVENT_RE.search(text)
+
+    if not match:
+        return None
+
+    return clean_text(match.group(1)), clean_text(match.group(2))
+
 
 def scrape_one():
     url = "https://en.wikipedia.org/wiki/List_of_ONE_Championship_events"
@@ -315,6 +431,7 @@ def scrape_one():
 
     soup = BeautifulSoup(html, "html.parser")
     events = []
+    now = datetime.now(timezone.utc)
 
     table = soup.select_one("table.wikitable")
 
@@ -364,13 +481,33 @@ def scrape_one():
             else url
         )
 
+        fights = []
+        days_out = (date - now).days
+
+        if event_url != url and 0 <= days_out <= ONE_FETCH_FIGHTERS_WITHIN_DAYS:
+            try:
+                time.sleep(1)
+                main_event = _fetch_one_main_event(event_url)
+
+                if main_event:
+                    fights = [{
+                        "fighter1": main_event[0],
+                        "fighter2": main_event[1],
+                        "label": "Main Event",
+                        "main_event": True
+                    }]
+
+            except Exception as e:
+                print(f"[WARN] Main event ONE '{name}': {e}")
+
         events.append(
             make_event(
                 organization="ONE",
                 name=name,
                 date=date,
                 url=event_url,
-                location=location or venue
+                location=location or venue,
+                fights=fights
             )
         )
 
